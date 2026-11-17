@@ -55,6 +55,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Any unhandled error prints the exact script line instead of "At line:1 char:1"
+trap {
+    Write-Host ""
+    Write-Host "FAILED at script line $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim())" -ForegroundColor Red
+    Write-Host "Error: $($_.Exception.GetType().FullName): $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+    Write-Host "PowerShell $($PSVersionTable.PSVersion) | Graph.Authentication $((Get-Module Microsoft.Graph.Authentication).Version)" -ForegroundColor DarkGray
+    break
+}
+
 # ---- Module ------------------------------------------------------------------
 if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
     Write-Host "Microsoft.Graph.Authentication not found - installing for current user..." -ForegroundColor Yellow
@@ -94,14 +104,18 @@ function Invoke-GraphRequestWithRetry {
 
 function Get-GraphCollection {
     param([string]$Uri)
-    $results = New-Object System.Collections.Generic.List[object]
+    # ArrayList + plain array return: avoids the generic List / AddRange / unary-comma
+    # combination, which can throw "Argument types do not match" on Windows PowerShell 5.1
+    $results = New-Object System.Collections.ArrayList
     $nextUri = $Uri
     while ($nextUri) {
         $resp = Invoke-GraphRequestWithRetry -Uri $nextUri
-        if ($resp.value) { $results.AddRange([object[]]$resp.value) }
+        foreach ($item in @($resp.value)) {
+            if ($null -ne $item) { [void]$results.Add($item) }
+        }
         $nextUri = $resp.'@odata.nextLink'
     }
-    return ,$results
+    return $results.ToArray()
 }
 
 function New-ResultRow {
@@ -172,7 +186,7 @@ if ($MaxSites -gt 0 -and $allSites.Count -gt $MaxSites) {
 Write-Host "Processing $($allSites.Count) site(s)."
 
 # ---- Walk drives + root permissions ---------------------------------------------------
-$results   = New-Object System.Collections.Generic.List[object]
+$results   = New-Object System.Collections.ArrayList
 $processed = 0
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -184,12 +198,12 @@ foreach ($site in $allSites) {
         $drives = @(Get-GraphCollection -Uri "https://graph.microsoft.com/v1.0/sites/$($site.id)/drives?`$select=id,name,webUrl")
     }
     catch {
-        $results.Add((New-ResultRow -Site $site -Status "Error" -Action "Check-Access" -ErrorMessage $_.Exception.Message))
+        [void]$results.Add((New-ResultRow -Site $site -Status "Error" -Action "Check-Access" -ErrorMessage $_.Exception.Message))
         continue
     }
 
     if ($drives.Count -eq 0) {
-        $results.Add((New-ResultRow -Site $site -Status "NoDrives" -Action "OK"))
+        [void]$results.Add((New-ResultRow -Site $site -Status "NoDrives" -Action "OK"))
         continue
     }
 
@@ -198,7 +212,7 @@ foreach ($site in $allSites) {
             $perms = @(Get-GraphCollection -Uri "https://graph.microsoft.com/v1.0/sites/$($site.id)/drives/$($drive.id)/root/permissions")
         }
         catch {
-            $results.Add((New-ResultRow -Site $site -DriveName $drive.name -Status "Error" -Action "Check-Access" -ErrorMessage $_.Exception.Message))
+            [void]$results.Add((New-ResultRow -Site $site -DriveName $drive.name -Status "Error" -Action "Check-Access" -ErrorMessage $_.Exception.Message))
             continue
         }
 
@@ -247,7 +261,7 @@ foreach ($site in $allSites) {
                 elseif ($permType -eq "OrganizationLink") { "Review-OrgWide-Link" }
                 else                                      { "OK" }
 
-            $results.Add([PSCustomObject]@{
+            [void]$results.Add([PSCustomObject]@{
                 SiteUrl            = $site.webUrl
                 SiteName           = $site.displayName
                 DriveName          = $drive.name
